@@ -1,0 +1,378 @@
+---
+title: "Data Exploration and Best Model Visual"
+author: "Quinn E Knudsen"
+date: "March 17, 2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+#Import and Store Dataset into 'HR'
+HR <- read.csv("C:/Users/KnudseQ/Desktop/HR_Dataset for Class.csv", stringsAsFactors = TRUE)
+attach(HR)
+
+#Package drop poin
+library(magrittr)
+library(ggplot2)
+library(knitr)
+library(ggthemes)
+library(dplyr)
+library(forcats)
+library(ROCR)
+library(pROC)
+library(caret)
+library(glmnet)
+library(psych)
+#EXplore data and variable types
+summary(HR)
+str(HR)
+#Remove Irrelevant Column: Employee Count
+HR <- HR[,-9]
+#Remove Irrelevant Column: Employee ID
+HR <- HR[,-9]
+#Remove Irrelevant Column: Over18
+HR <- HR[,-20]
+#Remove Irrelevant Column: Standard Hours
+HR <- HR[,-24]
+
+#Feature Engineering
+
+#Holistic Statisfaction 
+HR$SatisfactionOverall <- scale(HR$EnvironmentSatisfaction)+
+  scale(HR$JobSatisfaction)+scale(HR$RelationshipSatisfaction)+
+  scale(HR$WorkLifeBalance)/4
+
+#Stagnation Metric
+HR$Stagnating <- scale(HR$YearsInCurrentRole)+scale(HR$YearsWithCurrManager)+
+  scale(HR$YearsSinceLastPromotion)/3
+
+#Tenure per Job Worked  
+HR$TenurePerJob <- round(ifelse(HR$NumCompaniesWorked!=0, 
+                                HR$TotalWorkingYears/HR$NumCompaniesWorked,0),2)
+
+#Value for High Job Importance to Pay
+HR$UnderValueJobLevel <- scale(HR$JobLevel)/median(MonthlyIncome)
+
+#High Job Importance, High Pay
+HR$BigShot <- scale(HR$JobLevel)+scale(HR$MonthlyIncome)
+
+#Time Since Promoted
+HR$TimeSincePromotion <- scale(HR$YearsInCurrentRole) - scale(HR$YearsSinceLastPromotion)
+
+#Excessive Travel
+HR$AlwaysOnTheRoad <- scale(HR$DistanceFromHome) + scale(as.numeric(HR$BusinessTravel))
+
+#Compa Ratio per job role and overall
+#Compa ratio overall
+MedianCompaOverall <- median(HR$MonthlyIncome)
+HR$OverallCompaRatio <- HR$MonthlyIncome/MedianCompaOverall
+#Compa per job department 
+HRCompaMedian <- median(HR[HR$Department == 'Human Resources',]$MonthlyIncome)
+SalesCompaMedian <- median(HR[HR$Department == 'Sales',]$MonthlyIncome)
+RDCompaMedian <- median(HR[HR$Department == 'Research & Development',]$MonthlyIncome)
+HR$DepartmentCompaRatio <- ifelse(HR$Department == 'Human Resources',HR$MonthlyIncome/HRCompaMedian,
+                                  ifelse(HR$Department=='Research & Development',HR$MonthlyIncome/RDCompaMedian,
+                                         HR$MonthlyIncome/SalesCompaMedian))
+#Binning 
+
+#Age Grouping
+HR$AgeGroup <- with(HR,ifelse(Age>55,8,ifelse(Age>50,7,ifelse(Age>45,6,ifelse(Age>40,5,
+                                                                              ifelse(Age>35,4,ifelse(Age>30,3,ifelse(Age>25,2,1)))))))) 
+#Distance Grouping
+HR$DistanceGroup <- with(HR,ifelse(DistanceFromHome>25,6,ifelse(DistanceFromHome>20,5,
+                                                                ifelse(DistanceFromHome>15,4,ifelse(DistanceFromHome>10,3,
+                                                                                                    ifelse(DistanceFromHome>5,2,1)))))) 
+#Years with Current Manager
+HR$YearsWithManagerGroup <- with(HR,ifelse(YearsWithCurrManager>15,5,
+                                           ifelse(YearsWithCurrManager>10,4,ifelse(YearsWithCurrManager>5,3,
+                                                                                   ifelse(YearsWithCurrManager>2,2,1))))) 
+#Number of Companies Bin
+HR$NumCompaniesBin <- with(HR,ifelse(NumCompaniesWorked>5,'More than 5','Less than 5'))
+#Exploratory Visuals
+suppressMessages(library(ggplot2))
+suppressMessages(library(grid))
+suppressMessages(library(gridExtra))
+suppressMessages(library(dplyr))
+suppressMessages(library(rpart))
+suppressMessages(library(rpart.plot))
+suppressMessages(library(randomForest))
+suppressMessages(library(caret))
+suppressMessages(library(gbm))
+suppressMessages(library(survival))
+suppressMessages(library(pROC))
+suppressMessages(library(DMwR))
+suppressMessages(library(scales))
+#Attrition by travel
+ggplot(HR, 
+       aes(x= BusinessTravel,  group=Attrition)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), 
+           stat="count", 
+           alpha = 0.7) +
+  geom_text(aes(label = scales::percent(..prop..), y = ..prop.. ), 
+            stat= "count", 
+            vjust = -.5) +
+  labs(y = "Percentage", fill="Business Travel") +
+  facet_grid(~Attrition) +
+  scale_y_continuous(labels=percent) + 
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("Those who left the company travel more frequently")
+
+#Attrition by OverTime
+ggplot(HR, 
+       aes(x = OverTime, group = Attrition)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), 
+           stat="count", 
+           alpha = 0.7) +
+  geom_text(aes(label = scales::percent(..prop..), y = ..prop.. ), 
+            stat= "count", 
+            vjust = -.5) +
+  labs(y = "Percentage", fill= "OverTime") +
+  facet_grid(~Attrition) +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("Those who left the company tended to work overtime")
+
+library(formattable)
+HR$Attrition <- as.numeric(HR$Attrition)
+# Calculate the turnover rate for each salary hike range 
+departmentgraph <- HR %>% 
+  group_by(Department) %>% 
+  summarize(Attrition = mean(Attrition))
+
+# Check the results
+plot(departmentgraph)
+
+# Visualize the results
+ggplot(departmentgraph, aes(x = Department, y = Attrition, fill=(Department))) +  
+  geom_col()+ggtitle("Attrition Rates are the lowest in R&D and highest in Sales")+theme_bw()
+
+#Age heatmap (could add title)
+ggplot(data=HR, aes(HR$Age)) + 
+  geom_histogram(breaks=seq(20, 50, by=2), 
+                 col="red", 
+                 aes(fill=..count..))+
+  labs(x="Age", y="Count")+
+  scale_fill_gradient("Count", low="green", high="red")+  ggtitle("Age is nomrally distributed")+
+  theme_economist()
+#Retaining married employees well
+HR %>%
+  ggplot(aes(x = MaritalStatus, group = Attrition)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), 
+           stat="count", 
+           alpha = 0.7) +
+  geom_text(aes(label = scales::percent(..prop..), y = ..prop.. ), 
+            stat= "count", 
+            vjust = -.5) +
+  labs(y = "Percentage", fill= "Marital Status") +
+  facet_grid(~Attrition) +
+  theme_minimal()+
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("Attrition is Higher for Single Employees")
+
+
+HR %>%
+  ggplot(aes(x = JobSatisfaction, group = Attrition)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), 
+           stat="count", 
+           alpha = 0.7) +
+  geom_text(aes(label = scales::percent(..prop..), y = ..prop.. ), 
+            stat= "count", 
+            vjust = -.5) +
+  labs(y = "Percentage", fill= "Job Satisfaction") +
+  facet_grid(~Attrition) +
+  theme_minimal()+
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("Highly Dissatisfied Employees Tend to Leave the Company")
+
+
+HR %>%
+  ggplot(aes(x = PerformanceRating, group = Attrition)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), 
+           stat="count", 
+           alpha = 0.7) +
+  geom_text(aes(label = scales::percent(..prop..), y = ..prop.. ), 
+            stat= "count", 
+            vjust = -.5) +
+  labs(y = "Percentage", fill= "Performance Rating") +
+  facet_grid(~Attrition) +
+  theme_minimal()+
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("Performance Rating Differences Do Not Exsist")
+
+HR %>%
+  ggplot(aes(x = NumCompaniesWorked, group = Attrition)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), 
+           stat="count", 
+           alpha = 0.7) +
+  geom_text(aes(label = scales::percent(..prop..), y = ..prop.. ), 
+            stat= "count", 
+            vjust = -.5) +
+  labs(y = "Percentage", fill= "No. of Companies") +
+  facet_grid(~Attrition) +
+  theme_minimal()+
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("As the Number of Companies Goes Up, So Does the Attrition")
+
+HR %>%
+  ggplot(aes(x = NumCompaniesBin, group = Attrition)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), 
+           stat="count", 
+           alpha = 0.7) +
+  geom_text(aes(label = scales::percent(..prop..), y = ..prop.. ), 
+            stat= "count", 
+            vjust = -.5) +
+  labs(y = "Percentage", fill= "No. of Companies") +
+  facet_grid(~Attrition) +
+  theme_minimal()+
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("As the Number of Companies Goes Up, So Does the Attrition")
+
+
+HR %>%
+  ggplot(aes(x = Department, group = Attrition)) + 
+  geom_bar(aes(y = ..prop.., fill = factor(..x..)), 
+           stat="count", 
+           alpha = 0.7) +
+  geom_text(aes(label = scales::percent(..prop..), y = ..prop.. ), 
+            stat= "count", 
+            vjust = -.5) +
+  labs(y = "Percentage", fill= "No. of Companies") +
+  facet_grid(~Attrition) +
+  theme_bw()+
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + 
+  ggtitle("Examining the Sales Attrition is a Priority")
+
+HR %>% 
+  count(WorkLifeBalance = factor(WorkLifeBalance), JobSatisfaction = factor(JobSatisfaction)) %>% 
+  mutate(pct = prop.table(n)) %>% 
+  ggplot(aes(x = WorkLifeBalance, y = pct, fill = JobSatisfaction, label = scales::percent(pct))) + 
+  geom_col(position = 'dodge') + 
+  geom_text(position = position_dodge(width = .9),    # move to center of bars
+            vjust = -0.5,    # nudge above top of bar
+            size = 3) + 
+  scale_y_continuous(labels = scales::percent)
+
+HR %>% 
+  count(WorkLifeBalance = factor(BusinessTravel), JobSatisfaction = factor(JobSatisfaction)) %>% 
+  mutate(pct = prop.table(n)) %>% 
+  ggplot(aes(x = WorkLifeBalance, y = pct, fill = JobSatisfaction, label = scales::percent(pct))) + 
+  geom_col(position = 'dodge') + 
+  geom_text(position = position_dodge(width = .9),    # move to center of bars
+            vjust = -0.5,    # nudge above top of bar
+            size = 3) + 
+  scale_y_continuous(labels = scales::percent)
+
+HR %>% 
+  count(WorkLifeBalance = factor(WorkLifeBalance), Attrition = factor(Attrition)) %>% 
+  mutate(Percent = prop.table(n)) %>% 
+  ggplot(aes(x = WorkLifeBalance, y = Percent, fill = Attrition, label = scales::percent(Percent))) + 
+  geom_col(position = 'dodge') + 
+  geom_text(position = position_dodge(width = .9),    # move to center of bars
+            vjust = -0.5,    # nudge above top of bar
+            size = 3) + 
+  scale_y_continuous(labels = scales::percent)
+
+
+HR %>% 
+  count(Gender = factor(Gender), Attrition = factor(Attrition)) %>% 
+  mutate(Percent = prop.table(n)) %>% 
+  ggplot(aes(x = Gender, y = Percent, fill = Attrition, label = scales::percent(Percent))) + 
+  geom_col(position = 'dodge') + 
+  geom_text(position = position_dodge(width = .9),    # move to center of bars
+            vjust = -0.5,    # nudge above top of bar
+            size = 3) + 
+  scale_y_continuous(labels = scales::percent)
+
+#Bivariate Analysis
+library(corrplot)
+corrplot(cor(sapply(HR,as.integer)),method = "pie")
+numeric=HR %>% dplyr::select(Age,DailyRate,DistanceFromHome,HourlyRate,MonthlyIncome,
+                             MonthlyRate,NumCompaniesWorked,PercentSalaryHike,YearsAtCompany,
+                             YearsInCurrentRole,YearsSinceLastPromotion,YearsWithCurrManager,
+                             TotalWorkingYears,TrainingTimesLastYear,StockOptionLevel)
+corrplot(cor(numeric),method="circle",type="upper")
+
+
+#Gender and Salary Boxplot
+ggplot(HR,aes(Gender,MonthlyIncome,fill=Gender))+geom_boxplot()+theme_few()+
+  theme(legend.position="none",plot.title=element_text(hjust=0.5,size=10))+
+  labs(x="Gender",y="Salary",title="Salary with Gender", subtitle="Females Earn Slighly More on Average")+coord_flip()
+
+
+#Non-significant findings with M/F t-tests
+
+#T test distance from home and attrition
+t.test(DistanceFromHome ~ Attrition, alternative = "two.sided", conf.level = 0.95, 
+       var.equal = FALSE, data = HR)
+
+# T Test job satisfaction and attrition
+t.test(JobSatisfaction ~ Attrition, alternative = "two.sided", conf.level = 0.95, 
+       var.equal = FALSE, data = HR)
+#Years with Current Manager T Test
+t.test(YearsWithCurrManager ~ Attrition, alternative = "two.sided", conf.level = 0.95, 
+       var.equal = FALSE, data = HR)
+# Work life balance T Test
+t.test(WorkLifeBalance ~ Attrition, alternative = "two.sided", conf.level = 0.95, 
+       var.equal = FALSE, data = HR)
+#Model predicting job satisfaction
+jsat_linear <- lm(JobSatisfaction ~ HourlyRate + NumCompaniesWorked, data = HR)
+summary(jsat_linear)
+
+# Partioning the data train 80% test 20%
+set.seed(1234)
+ind <- sample(2, nrow(HR), replace =T, prob = c(0.8, 0.2))
+train <- HR[ind==1,]
+test <- HR[ind==2,]
+
+#Remove Total Years Working
+logistic <- glm(as.factor(Attrition) ~ Age + BusinessTravel + DistanceFromHome + EnvironmentSatisfaction  
+                + JobInvolvement + JobSatisfaction + MaritalStatus + 
+                  MonthlyIncome + NumCompaniesWorked + OverTime + RelationshipSatisfaction + 
+                  TrainingTimesLastYear + WorkLifeBalance + YearsAtCompany + YearsInCurrentRole + 
+                  YearsSinceLastPromotion + YearsWithCurrManager +
+                 DepartmentCompaRatio, family = binomial(logit), data = train)
+summary(logistic)
+importance<- varImp(logistic, scale=FALSE)
+print(importance)
+plot(importance)
+
+Feature <- c('Age','BusinessTravelTravel_Frequently','BusinessTravelTravel_Rarely','DistanceFromHome',
+             'EnvironmentSatisfaction', 'JobInvolvement', 'JobSatisfaction', 'MaritalStatusMarried',
+             'MaritalStatusSingle','MonthlyIncome', 'NumCompaniesWorked', 'OverTimeYes', 'RelationshipSatisfaction',
+             'TrainingTimesLastYear', 'WorkLifeBalance','YearsAtCompany', 'YearsInCurrentRole',
+             'YearsSinceLastPromotion ','YearsWithCurrManager','DepartmentCompaRatio')
+Importance <- c( 3.877506, 3.908459, 2.421671, 3.099571,4.884574,4.786916,4.460295,1.584754, 4.756804
+                 ,2.916465,4.194101,8.900276,2.033153,2.284960,1.856127, 2.674383, 3.152661, 3.465123
+                 ,3.381788,  3.964142)
+df <- data.frame(Feature, Importance)
+ggplot(df,aes(x=Feature, y=Importance))+geom_col()
+ggplot(df,aes(x=Importance, y=Feature, size=Importance, color=Importance))+geom_count()+theme_linedraw()+
+  ggtitle('Relative Importance of Significant Variables')
+
+
+#Add best model to have predicted chance of attrition to main dataset 
+
+#Over Sample Yes Responses (potential alternative solution)
+
+#Export to Excel
+library(readxl)
+library(writexl)
+library(openxlsx)
+write.xlsx(HR, file = "HR_Modeling_Output.xlsx", sheetName = "Employees", append = TRUE)
+#END OF MAIN ACTIVE CODE#
+
+#Sources
+#https://www.kaggle.com/pavansubhasht/ibm-hr-analytics-attrition-dataset
+#https://towardsdatascience.com/people-analytics-with-attrition-predictions-12adcce9573f
+#https://towardsdatascience.com/human-resources-hr-analytics-on-employee-attrition-afdc3cfa0da8
+#https://github.com/IBM/employee-attrition-aif360
+#http://inseaddataanalytics.github.io/INSEADAnalytics/groupprojects/January2018FBL/IBM_Attrition_VSS.html
+
+
+
+
+
+```
